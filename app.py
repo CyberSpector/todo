@@ -100,6 +100,8 @@ def get_user(db: Session, user_id: int):
 def create_default_users(db: Session):
     users = [
         {"username": "jedade", "email": "jediel@cyberspector.com", "password": "string@@2019"},
+        {"username": "user1", "email": "user1@cyberspector.com", "password": "string@@2019"},
+        {"username": "user2", "email": "user2@cyberspector.com", "password": "string@@2019"},
     ]
     
     for user_data in users:
