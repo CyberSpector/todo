@@ -2,3 +2,5 @@ fastapi[all]
 passlib 
 python-jose 
 sqlalchemy
+pytest 
+httpx

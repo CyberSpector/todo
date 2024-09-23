@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from passlib.context import CryptContext
@@ -36,7 +36,7 @@ class Task(Base):
     description = Column(String, nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     completed = Column(Boolean, default=False)
-    due_date = Column(String)  # Ajout d'une date limite
+    due_date = Column(DateTime)  # Changement pour DateTime
 
 Base.metadata.create_all(bind=engine)
 
@@ -71,11 +71,18 @@ class UserOut(BaseModel):
 class TaskCreate(BaseModel):
     title: str
     description: str = None
-    due_date: str  # Ajout d'une date limite
+    due_date: datetime  # Changement pour DateTime
 
 class TaskOut(TaskCreate):
     id: int
     completed: bool
+
+class TaskStats(BaseModel):
+    total_tasks: int
+    completed_tasks: int
+    incomplete_tasks: int
+    completed_on_time: int
+    remaining_tasks: int
 
 # Functions
 
@@ -123,12 +130,6 @@ def get_db():
 # Auth
 @app.post("/login", response_model=dict)
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    """
-    Log in a user to receive an access token.
-
-    - **username**: The email of the user.
-    - **password**: The password of the user.
-    """
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user or not verify_password(form_data.password, user.password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials", headers={"WWW-Authenticate": "Bearer"})
@@ -136,11 +137,9 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
     access_token = create_access_token(data={"sub": str(user.id)})
     return {"access_token": access_token, "token_type": "bearer"}
 
+# Tasks
 @app.post("/tasks", response_model=TaskOut)
 async def create_task(task: TaskCreate, db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
-    """
-    Create a new task for the logged-in user.
-    """
     user_id = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
     new_task = Task(**task.dict(), user_id=user_id)
     db.add(new_task)
@@ -150,18 +149,33 @@ async def create_task(task: TaskCreate, db: Session = Depends(get_db), token: st
 
 @app.get("/tasks", response_model=List[TaskOut])
 async def get_tasks(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
-    """
-    Retrieve all tasks for the logged-in user.
-    """
     user_id = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
     tasks = db.query(Task).filter(Task.user_id == user_id).all()
     return tasks
 
+# Task statistics
+@app.get("/tasks/stats", response_model=TaskStats)
+async def get_task_statistics(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
+    user_id = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
+    tasks = db.query(Task).filter(Task.user_id == user_id).all()
+    
+    total_tasks = len(tasks)
+    completed_tasks = len([task for task in tasks if task.completed])
+    incomplete_tasks = total_tasks - completed_tasks
+    completed_on_time = len([task for task in tasks if task.completed and task.due_date >= datetime.utcnow()])
+    remaining_tasks = incomplete_tasks
+
+    return TaskStats(
+        total_tasks=total_tasks,
+        completed_tasks=completed_tasks,
+        incomplete_tasks=incomplete_tasks,
+        completed_on_time=completed_on_time,
+        remaining_tasks=remaining_tasks
+    )
+
+# Update and Delete Tasks
 @app.put("/tasks/{task_id}", response_model=TaskOut)
 async def update_task(task_id: int, task: TaskCreate, db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
-    """
-    Update a task for the logged-in user.
-    """
     user_id = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
     task_to_update = db.query(Task).filter(Task.id == task_id, Task.user_id == user_id).first()
     if not task_to_update:
@@ -175,9 +189,6 @@ async def update_task(task_id: int, task: TaskCreate, db: Session = Depends(get_
 
 @app.delete("/tasks/{task_id}")
 async def delete_task(task_id: int, db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
-    """
-    Delete a task for the logged-in user.
-    """
     user_id = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
     task_to_delete = db.query(Task).filter(Task.id == task_id, Task.user_id == user_id).first()
     if not task_to_delete:
@@ -186,6 +197,23 @@ async def delete_task(task_id: int, db: Session = Depends(get_db), token: str = 
     db.delete(task_to_delete)
     db.commit()
     return {"message": "Task deleted successfully!"}
+
+@app.patch("/tasks/{task_id}/complete", response_model=TaskOut)
+async def complete_task(task_id: int, db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
+    """
+    Mark a task as completed for the logged-in user.
+    
+    - **task_id**: The ID of the task to be marked as completed.
+    """
+    user_id = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
+    task_to_complete = db.query(Task).filter(Task.id == task_id, Task.user_id == user_id).first()
+    if not task_to_complete:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task_to_complete.completed = True  # Marquer la tâche comme terminée
+    db.commit()
+    db.refresh(task_to_complete)
+    return task_to_complete
 
 # Create default users
 @app.on_event("startup")
@@ -196,4 +224,4 @@ def startup_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=1000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
